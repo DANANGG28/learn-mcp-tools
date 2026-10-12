@@ -1,0 +1,21 @@
+{
+  "name": "learn-mcp-tools",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "engines": { "node": ">=20.18" },
+  "bin": { "learn-mcp-tools": "./src/server.mjs" },
+  "scripts": {
+    "auth": "node scripts/auth-smoke.mjs",
+    "smoke": "node scripts/read-smoke.mjs",
+    "scan": "bash scripts/scan-terms.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "cheerio": "1.2.0",
+    "puppeteer-core": "25.13.0",
+    "zod": "4.6.7"
+  },
+  "license": "MIT",
+  "author": "DANANGG28"
+}
