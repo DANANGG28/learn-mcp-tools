@@ -7,6 +7,7 @@ import { acquire } from "./auth.mjs";
 import { config } from "./config.mjs";
 import { getHtml, postMultipart } from "./client.mjs";
 import { clean, collectHiddenFields, summarize } from "./parse.mjs";
+import { redact, redactObject } from "./redact.mjs";
 import { loadState, stateStatus } from "./session.mjs";
 
 const ACCESS_PREFIX = "/akses/";
@@ -23,7 +24,7 @@ export class ToolError extends Error {
 }
 
 function payload(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+  return { content: [{ type: "text", text: redact(JSON.stringify(redactObject(value), null, 2)) }] };
 }
 
 function ok(value) {
