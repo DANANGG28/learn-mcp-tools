@@ -4,5 +4,6 @@ npm-shrinkwrap.json
 state.json
 .env
 .env.*
+!.env.example
 *.local.json
 *.log
