@@ -4,7 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { registerReadTools } from "../src/tools.mjs";
+import { registerReadTools, registerSubmissionTools } from "../src/tools.mjs";
 import { setRequestObserver } from "../src/client.mjs";
 
 setRequestObserver((method, resourcePath) => console.log(`${method} ${resourcePath}`));

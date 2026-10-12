@@ -2,11 +2,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { config } from "./config.mjs";
-import { registerReadTools } from "./tools.mjs";
+import { registerReadTools, registerSubmissionTools } from "./tools.mjs";
 
 const server = new McpServer({ name: "learn-mcp-tools", version: "1.0.0" });
 
 registerReadTools(server);
+registerSubmissionTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport).catch((err) => {

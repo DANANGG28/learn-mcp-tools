@@ -3,14 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 
+import { acquire } from "./auth.mjs";
 import { config } from "./config.mjs";
-import { getHtml } from "./client.mjs";
+import { getHtml, postMultipart } from "./client.mjs";
 import { clean, collectHiddenFields, summarize } from "./parse.mjs";
 import { loadState, stateStatus } from "./session.mjs";
 
 const ACCESS_PREFIX = "/akses/";
 const SUBMISSION_PREFIX = "/akses/pengumpulan-tugas/";
 const DEADLINE_PATTERN = /(deadline|batas|tenggat|dikumpulkan|due)/i;
+const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 
 export class ToolError extends Error {
   constructor(code, message, hint) {
@@ -173,6 +175,51 @@ async function collectAssignment(pertemuanId, tugasId) {
   };
 }
 
+function readUpload(filePath) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    throw new ToolError("file_missing", `berkas tidak ditemukan: ${filePath}`);
+  }
+  if (!stat.isFile()) throw new ToolError("file_unreadable", `bukan berkas biasa: ${filePath}`);
+  if (stat.size > MAX_UPLOAD_BYTES) throw new ToolError("file_unreadable", "berkas melebihi 200 MB");
+  try {
+    return { bytes: fs.readFileSync(filePath), filename: path.basename(filePath) };
+  } catch {
+    throw new ToolError("file_unreadable", "berkas tidak dapat dibaca");
+  }
+}
+
+// The submit form's hidden inputs come from the rendered page verbatim, so the
+// request mirrors what the server expects instead of guessing field values.
+function submissionFields(form, hiddenPairs, description) {
+  const fields = [];
+  for (const pair of hiddenPairs) {
+    if (typeof pair.name !== "string" || pair.name === "") continue;
+    fields.push([pair.name, pair.value]);
+  }
+  const known = new Set(fields.map(([name]) => name));
+  for (const field of form?.fields ?? []) {
+    if (typeof field.name !== "string" || field.name === "" || known.has(field.name)) continue;
+    if (field.type === "file" || field.type === "submit" || field.type === "button" || field.type === "hidden") continue;
+    fields.push([field.name, ""]);
+    known.add(field.name);
+  }
+  const descriptionField = (form?.fields ?? []).find((field) => field.type === "textarea")?.name ?? "deskripsi";
+  if (description !== undefined) {
+    const index = fields.findIndex(([name]) => name === descriptionField);
+    if (index >= 0) fields[index] = [descriptionField, description];
+    else fields.push([descriptionField, description]);
+  }
+  return fields;
+}
+
+function tokenFromHtml(html) {
+  const meta = /<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i.exec(html ?? "");
+  return meta?.[1] ?? "";
+}
+
 export function registerReadTools(server) {
   server.registerTool(
     "status",
@@ -276,5 +323,110 @@ export function registerReadTools(server) {
     withErrors(async ({ pertemuan_id: pertemuanId, tugas_id: tugasId }) =>
       ok(await collectAssignment(pertemuanId, tugasId)),
     ),
+  );
+}
+
+export function registerSubmissionTools(server) {
+  server.registerTool(
+    "submit",
+    {
+      title: "Submit assignment file",
+      description: "Upload one local file as the assignment submission. Gated behind the write flag.",
+      inputSchema: {
+        pertemuan_id: z.int().min(1).describe("Meeting identifier"),
+        tugas_id: z.int().min(1).describe("Assignment identifier"),
+        file_path: z.string().describe("Absolute local path of the file to upload"),
+        description: z.string().optional().describe("Optional text for the submission description field"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("When true, build the request and report it without sending anything"),
+      },
+    },
+    withErrors(
+      async ({ pertemuan_id: pertemuanId, tugas_id: tugasId, file_path: filePath, description, dry_run: dryRun }) => {
+        if (!config.allowWrite) {
+          throw new ToolError(
+            "write_disabled",
+            "pengumpulan dinonaktifkan",
+            "set LMS_ALLOW_WRITE=1 lalu /mcp reload",
+          );
+        }
+
+        const upload = readUpload(filePath);
+        const assignment = await collectAssignment(pertemuanId, tugasId);
+        const form = assignment.submit_form;
+        const fallback = `/pertemuan/${pertemuanId}/tugas/${tugasId}/submit`;
+        const action = form && form.action.includes("/tugas/") ? form.action : fallback;
+
+        const page = await getHtml(`/pertemuan/${pertemuanId}/tugas/${tugasId}`);
+        ensureOk(page);
+        const hiddenPairs = collectHiddenFields(page.body, action);
+        const token =
+          hiddenPairs.find((pair) => pair.name === "_token")?.value || assignment.csrf_token || tokenFromHtml(page.body);
+        if (!token) throw new ToolError("http_error", "csrf token tidak ditemukan pada halaman tugas");
+
+        const fields = submissionFields(form, hiddenPairs, description).map(([name, value]) =>
+          name === "_token" ? [name, token] : [name, value],
+        );
+        if (!fields.some(([name]) => name === "_token")) fields.unshift(["_token", token]);
+
+        const fileField = form?.file_field ?? "file";
+
+        if (dryRun === true) {
+          return ok({
+            dry_run: true,
+            action,
+            method: "POST",
+            enctype: form?.enctype ?? "multipart/form-data",
+            fields: fields.map(([name, value]) => ({ name, value_length: value.length })),
+            file: { field: fileField, path: filePath, bytes: upload.bytes.length },
+            form_found: form !== null,
+          });
+        }
+
+        const result = await postMultipart(action, {
+          fields,
+          file: { field: fileField, filename: upload.filename, bytes: upload.bytes },
+          headers: {
+            origin: config.origin,
+            referer: `${config.baseUrl}/pertemuan/${pertemuanId}/tugas/${tugasId}`,
+          },
+        });
+
+        const accepted = result.kind === "ok" && result.status < 400;
+        const submitted =
+          result.body.includes("pengumpulan-tugas/") ||
+          (accepted && (await collectAssignment(pertemuanId, tugasId)).submitted);
+        const message =
+          /id=["'](?:error|success)Toast["'][^>]*>([^<]+)</i.exec(result.body)?.[1]?.trim() ?? null;
+
+        return ok({
+          ok: accepted,
+          status: result.status,
+          final_url: result.finalUrl,
+          submitted,
+          message,
+        });
+      },
+    ),
+  );
+
+  server.registerTool(
+    "auth",
+    {
+      title: "Establish session",
+      description:
+        "Open a headed browser for a one-time manual sign-in and persist the cookies, or validate a pasted cookie header. Never receives a password.",
+      inputSchema: {
+        cookie_header: z.string().optional().describe("Optional raw Cookie header copied from a signed-in browser"),
+        timeout_seconds: z.int().min(10).optional().describe("Seconds to wait for the manual sign-in, default 240"),
+      },
+    },
+    withErrors(async ({ cookie_header: cookieHeader, timeout_seconds: timeoutSeconds }) => {
+      const result = await acquire({ cookieHeader, timeoutSeconds });
+      if (result.error) return fail(new ToolError(result.error.code, result.error.message, result.error.hint));
+      return ok(result);
+    }),
   );
 }
